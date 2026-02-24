@@ -228,6 +228,8 @@ PYTHONPATH=python python3 scripts/benchmarks/benchmark_glyph_full.py
 
 See [docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) for measured numbers and [docs/BENCHMARKING.md](docs/BENCHMARKING.md) for the full guide.
 
+For benchmark review with example pictures review [git pages](https://bighippo123.github.io/pointcloud-raster/)
+
 ---
 
 ## Scripts
