@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  pcr-benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    image: pcr-gpu-benchmark:latest
+    container_name: pcr-benchmark
+
+    # GPU access (requires NVIDIA Docker runtime)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Alternative for older docker-compose (use one or the other)
+    # runtime: nvidia
+
+    # Mount points for easy result access
+    volumes:
+      - ./results:/workspace/results
+      - ./build:/workspace/build
+
+    # Environment variables
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0  # Use first GPU
+
+    # Keep container running for interactive use
+    stdin_open: true
+    tty: true
+
+    # Network mode
+    network_mode: "host"

@@ -1,0 +1,23 @@
+================================================================================
+CPU vs GPU Performance Benchmark
+================================================================================
+
+✓ GPU available (Utilization: 0%, Memory: 1006 MB)
+
+Generating test patterns...
+✓ Generated 3 test patterns
+
+
+================================================================================
+Benchmarking: checkerboard_1M (25,600,000 points)
+================================================================================
+
+[CPU] Processing...
+Traceback (most recent call last):
+  File "/workspace/scripts/benchmark_cpu_gpu.py", line 226, in <module>
+    main()
+  File "/workspace/scripts/benchmark_cpu_gpu.py", line 147, in main
+    cpu_result = benchmark_pattern(pattern_name, pattern_cloud, use_gpu=False)
+  File "/workspace/scripts/benchmark_cpu_gpu.py", line 76, in benchmark_pattern
+    pipeline.ingest(cloud)
+RuntimeError: cell index out of range

@@ -1,0 +1,109 @@
+# PCR GPU Benchmarking Docker Image
+# Based on NVIDIA CUDA official image with Ubuntu 22.04
+FROM nvidia/cuda:13.0.0-devel-ubuntu22.04
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    wget \
+    curl \
+    vim \
+    python3 \
+    python3-pip \
+    libgdal-dev \
+    gdal-bin \
+    libproj-dev \
+    proj-bin \
+    libgtest-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python packages for visualization and testing
+RUN pip3 install --no-cache-dir \
+    pandas \
+    matplotlib \
+    seaborn \
+    numpy \
+    rasterio \
+    Pillow
+
+# Set up working directory
+WORKDIR /workspace
+
+# Copy the entire PCR codebase
+COPY . /workspace/
+
+# Create build directory
+RUN mkdir -p /workspace/build
+
+# Set CUDA architecture (adjust based on your GPU)
+# Common values: 70 (V100), 75 (T4, RTX 20xx), 80 (A100), 86 (RTX 30xx)
+# Note: compute_89 (RTX 40xx) requires CUDA 11.8+ with specific nvcc flags
+ENV CUDA_ARCHITECTURES="75;80;86"
+
+# Build PCR with CUDA enabled
+WORKDIR /workspace/build
+RUN cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DPCR_ENABLE_CUDA=ON \
+    -DPCR_BUILD_TESTS=ON \
+    -DPCR_BUILD_BENCHMARKS=ON \
+    -DPCR_BUILD_PYTHON=ON \
+    -DPCR_BUILD_EXAMPLES=OFF \
+    -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" \
+    && make -j$(nproc)
+
+# Create output directory for results
+RUN mkdir -p /workspace/results
+
+# Copy visualization test scripts
+COPY ../scripts/generate_all_patterns.py /workspace/
+COPY ../scripts/generate_gpu_patterns.py /workspace/
+COPY ../scripts/compare_cpu_gpu_patterns.py /workspace/
+COPY ../scripts/run_gpu_visual_tests.sh /workspace/
+RUN chmod +x /workspace/run_gpu_visual_tests.sh
+
+# Set environment variables
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+ENV PATH=/usr/local/cuda/bin:${PATH}
+ENV PYTHONPATH=/workspace/python
+
+# Default command: run the comprehensive benchmark
+CMD ["/bin/bash", "-c", "\
+    echo '========================================'; \
+    echo 'PCR GPU Benchmarking Container'; \
+    echo '========================================'; \
+    echo ''; \
+    echo 'GPU Information:'; \
+    nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader; \
+    echo ''; \
+    echo 'Running comprehensive CPU vs GPU benchmark...'; \
+    echo ''; \
+    cd /workspace/build && \
+    ./bench_compare_cpu_gpu | tee /workspace/results/benchmark_output.txt && \
+    echo '' && \
+    echo 'Generating visualizations...' && \
+    cd /workspace/results && \
+    cp /workspace/build/performance_results.csv . && \
+    python3 /workspace/benchmarks/visualize_performance.py performance_results.csv && \
+    echo '' && \
+    echo '========================================' && \
+    echo 'Benchmark Complete!' && \
+    echo '========================================' && \
+    echo '' && \
+    echo 'Results saved to: /workspace/results/' && \
+    ls -lh /workspace/results/ && \
+    echo '' && \
+    echo 'To copy results to host:' && \
+    echo '  docker cp <container_id>:/workspace/results ./pcr_results' && \
+    echo '' \
+"]
+
+# Alternative: Interactive shell
+# Uncomment this line if you want to explore interactively instead
+# CMD ["/bin/bash"]

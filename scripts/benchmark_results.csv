@@ -1,0 +1,7 @@
+Metric,CPU,GPU,Speedup
+Points,67108864,67108864,1.0
+Ingest_Time_sec,82.177,85.642,0.96
+Total_Time_sec,86.606,89.747,0.96
+Throughput_Mpts,0.82,0.78,0.96
+Peak_RAM_MB,0,0,1.0
+GPU_Memory_MB,0,0,N/A
