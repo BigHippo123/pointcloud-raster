@@ -23,7 +23,7 @@ Status tile_router_assign_gpu(
     void* stream);
 
 /// Sort arrays by (tile_index, cell_index) using CUB radix sort.
-/// Co-sorts value, weight, timestamp arrays.
+/// Co-sorts value, weight, timestamp and optional glyph arrays.
 Status tile_router_sort_gpu(
     uint32_t* d_cell_indices,
     uint32_t* d_tile_indices,
@@ -33,7 +33,8 @@ Status tile_router_sort_gpu(
     float*    d_timestamps,
     size_t    num_points,
     MemoryPool* pool,
-    void* stream);
+    void* stream,
+    GlyphSortArrays* glyph = nullptr);
 
 /// Convert global cell indices to local (within-tile) cell indices on GPU.
 Status tile_router_global_to_local_gpu(

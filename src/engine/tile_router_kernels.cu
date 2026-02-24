@@ -94,6 +94,13 @@ __global__ void kernel_apply_perm_f32(
     if (i < n) dst[i] = src[perm[i]];
 }
 
+__global__ void kernel_apply_perm_f64(
+    const double* src, double* dst, const uint32_t* perm, size_t n)
+{
+    size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = src[perm[i]];
+}
+
 __global__ void kernel_global_to_local(
     uint32_t* cell_indices, const uint32_t* tile_indices,
     size_t num_points, int grid_width, int grid_height, int tile_width, int tile_height, int tiles_x)
@@ -163,7 +170,8 @@ Status tile_router_sort_gpu(
     uint32_t* d_cell_indices, uint32_t* d_tile_indices,
     uint8_t* d_valid_mask,
     float* d_values, float* d_weights, float* d_timestamps,
-    size_t num_points, MemoryPool* pool, void* stream)
+    size_t num_points, MemoryPool* pool, void* stream,
+    GlyphSortArrays* glyph)
 {
     cudaStream_t s = static_cast<cudaStream_t>(stream);
     int blocks = grid_size(num_points);
@@ -245,6 +253,35 @@ Status tile_router_sort_gpu(
         if (!d_ts_tmp) return Status::error(StatusCode::OutOfMemory, "tile_router_sort: timestamps alloc failed");
         cudaMemcpyAsync(d_ts_tmp, d_timestamps, num_points * sizeof(float), cudaMemcpyDeviceToDevice, s);
         kernel_apply_perm_f32<<<blocks, BLOCK_SIZE, 0, s>>>(d_ts_tmp, d_timestamps, d_perm_out, num_points);
+    }
+
+    // Co-sort glyph arrays (double and float)
+    if (glyph) {
+        auto cosort_f64 = [&](double* arr) -> Status {
+            if (!arr) return Status::success();
+            double* tmp = static_cast<double*>(alloc(num_points * sizeof(double)));
+            if (!tmp) return Status::error(StatusCode::OutOfMemory, "tile_router_sort: glyph f64 alloc failed");
+            cudaMemcpyAsync(tmp, arr, num_points * sizeof(double), cudaMemcpyDeviceToDevice, s);
+            kernel_apply_perm_f64<<<blocks, BLOCK_SIZE, 0, s>>>(tmp, arr, d_perm_out, num_points);
+            return Status::success();
+        };
+        auto cosort_f32 = [&](float* arr) -> Status {
+            if (!arr) return Status::success();
+            float* tmp = static_cast<float*>(alloc(num_points * sizeof(float)));
+            if (!tmp) return Status::error(StatusCode::OutOfMemory, "tile_router_sort: glyph f32 alloc failed");
+            cudaMemcpyAsync(tmp, arr, num_points * sizeof(float), cudaMemcpyDeviceToDevice, s);
+            kernel_apply_perm_f32<<<blocks, BLOCK_SIZE, 0, s>>>(tmp, arr, d_perm_out, num_points);
+            return Status::success();
+        };
+
+        Status gs;
+        gs = cosort_f64(glyph->coord_x);     if (!gs.ok()) return gs;
+        gs = cosort_f64(glyph->coord_y);     if (!gs.ok()) return gs;
+        gs = cosort_f32(glyph->direction);   if (!gs.ok()) return gs;
+        gs = cosort_f32(glyph->half_length); if (!gs.ok()) return gs;
+        gs = cosort_f32(glyph->sigma_x);     if (!gs.ok()) return gs;
+        gs = cosort_f32(glyph->sigma_y);     if (!gs.ok()) return gs;
+        gs = cosort_f32(glyph->rotation);    if (!gs.ok()) return gs;
     }
 
     cudaError_t err = cudaGetLastError();

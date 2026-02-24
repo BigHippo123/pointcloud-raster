@@ -131,6 +131,7 @@ static Status assign_cpu(const PointCloud& cloud, TileAssignment& out,
 /// @param values Optional value array to sort alongside (can be nullptr)
 /// @param weights Optional weight array to sort alongside (can be nullptr)
 /// @param timestamps Optional timestamp array to sort alongside (can be nullptr)
+/// @param glyph Optional glyph arrays to co-sort (can be nullptr)
 /// @param config Grid configuration (unused, kept for signature consistency)
 /// @param sort_indices_buffer Working buffer for sort indices
 /// @param stream CUDA stream (unused in CPU implementation)
@@ -138,6 +139,7 @@ static Status sort_cpu(TileAssignment& assignment,
                        float* values,
                        float* weights,
                        float* timestamps,
+                       GlyphSortArrays* glyph,
                        const GridConfig& /*config*/,
                        std::vector<size_t>& sort_indices_buffer,
                        void* /*stream*/) {
@@ -210,6 +212,30 @@ static Status sort_cpu(TileAssignment& assignment,
         memcpy(timestamps, temp_timestamps.data(), num_points * sizeof(float));
     }
 
+    // Co-sort glyph arrays
+    if (glyph) {
+        auto apply_perm_f32 = [&](float* arr) {
+            if (!arr) return;
+            std::vector<float> tmp(num_points);
+            for (size_t i = 0; i < num_points; ++i) tmp[i] = arr[sort_indices_buffer[i]];
+            memcpy(arr, tmp.data(), num_points * sizeof(float));
+        };
+        auto apply_perm_f64 = [&](double* arr) {
+            if (!arr) return;
+            std::vector<double> tmp(num_points);
+            for (size_t i = 0; i < num_points; ++i) tmp[i] = arr[sort_indices_buffer[i]];
+            memcpy(arr, tmp.data(), num_points * sizeof(double));
+        };
+
+        apply_perm_f64(glyph->coord_x);
+        apply_perm_f64(glyph->coord_y);
+        apply_perm_f32(glyph->direction);
+        apply_perm_f32(glyph->half_length);
+        apply_perm_f32(glyph->sigma_x);
+        apply_perm_f32(glyph->sigma_y);
+        apply_perm_f32(glyph->rotation);
+    }
+
     return Status::success();
 }
 
@@ -223,12 +249,14 @@ static Status sort_cpu(TileAssignment& assignment,
 /// @param sorted_timestamps Optional sorted timestamp array (can be nullptr)
 /// @param out_batches Output vector of TileBatch objects (cleared first)
 /// @param config Grid configuration for tile layout
+/// @param glyph Optional sorted glyph arrays — pointers propagated into batches
 static Status extract_batches_cpu(const TileAssignment& assignment,
                                    float* sorted_values,
                                    float* sorted_weights,
                                    float* sorted_timestamps,
                                    std::vector<TileBatch>& out_batches,
-                                   const GridConfig& config) {
+                                   const GridConfig& config,
+                                   GlyphSortArrays* glyph = nullptr) {
     out_batches.clear();
 
     size_t num_points = assignment.num_points;
@@ -303,6 +331,17 @@ static Status extract_batches_cpu(const TileAssignment& assignment,
             batch.timestamps = sorted_timestamps ? (sorted_timestamps + batch_start) : nullptr;
             batch.num_points = batch_size;
             batch.location = MemoryLocation::Host;
+
+            // Propagate glyph array pointers (offset into sorted arrays)
+            if (glyph) {
+                batch.coord_x           = glyph->coord_x      ? glyph->coord_x      + batch_start : nullptr;
+                batch.coord_y           = glyph->coord_y      ? glyph->coord_y      + batch_start : nullptr;
+                batch.glyph_direction   = glyph->direction    ? glyph->direction    + batch_start : nullptr;
+                batch.glyph_half_length = glyph->half_length  ? glyph->half_length  + batch_start : nullptr;
+                batch.glyph_sigma_x     = glyph->sigma_x      ? glyph->sigma_x      + batch_start : nullptr;
+                batch.glyph_sigma_y     = glyph->sigma_y      ? glyph->sigma_y      + batch_start : nullptr;
+                batch.glyph_rotation    = glyph->rotation     ? glyph->rotation     + batch_start : nullptr;
+            }
 
             out_batches.push_back(batch);
 
@@ -409,7 +448,8 @@ static Status sort_gpu_dispatch(TileAssignment& assignment,
                                  float* weights,
                                  float* timestamps,
                                  MemoryPool* pool,
-                                 void* stream) {
+                                 void* stream,
+                                 GlyphSortArrays* glyph) {
     if (assignment.num_points == 0) return Status::success();
 
     return tile_router_sort_gpu(
@@ -417,7 +457,7 @@ static Status sort_gpu_dispatch(TileAssignment& assignment,
         assignment.valid_mask,
         values, weights, timestamps,
         assignment.num_points,
-        pool, stream);
+        pool, stream, glyph);
 }
 
 /// Public API dispatcher: routes to CPU or GPU based on assignment memory location
@@ -425,13 +465,14 @@ Status TileRouter::sort(TileAssignment& assignment,
                         float* values,
                         float* weights,
                         float* timestamps,
+                        GlyphSortArrays* glyph,
                         void* stream) {
     if (assignment.location == MemoryLocation::Host) {
         return sort_cpu(assignment, values, weights, timestamps,
-                        impl_->config, impl_->sort_indices, stream);
+                        glyph, impl_->config, impl_->sort_indices, stream);
     } else {
         return sort_gpu_dispatch(assignment, values, weights, timestamps,
-                                 impl_->pool, stream);
+                                 impl_->pool, stream, glyph);
     }
 }
 
@@ -443,7 +484,8 @@ static Status extract_batches_gpu_dispatch(const TileAssignment& assignment,
                                             float* sorted_weights,
                                             float* sorted_timestamps,
                                             std::vector<TileBatch>& out_batches,
-                                            const GridConfig& config) {
+                                            const GridConfig& config,
+                                            GlyphSortArrays* glyph = nullptr) {
     out_batches.clear();
     size_t num_points = assignment.num_points;
     if (num_points == 0) return Status::success();
@@ -491,6 +533,18 @@ static Status extract_batches_gpu_dispatch(const TileAssignment& assignment,
             batch.timestamps = sorted_timestamps ? (sorted_timestamps + batch_start) : nullptr;
             batch.num_points = batch_size;
             batch.location = MemoryLocation::Device;
+
+            // Propagate glyph array pointers (device memory offsets)
+            if (glyph) {
+                batch.coord_x           = glyph->coord_x     ? glyph->coord_x     + batch_start : nullptr;
+                batch.coord_y           = glyph->coord_y     ? glyph->coord_y     + batch_start : nullptr;
+                batch.glyph_direction   = glyph->direction   ? glyph->direction   + batch_start : nullptr;
+                batch.glyph_half_length = glyph->half_length ? glyph->half_length + batch_start : nullptr;
+                batch.glyph_sigma_x     = glyph->sigma_x     ? glyph->sigma_x     + batch_start : nullptr;
+                batch.glyph_sigma_y     = glyph->sigma_y     ? glyph->sigma_y     + batch_start : nullptr;
+                batch.glyph_rotation    = glyph->rotation    ? glyph->rotation    + batch_start : nullptr;
+            }
+
             out_batches.push_back(batch);
 
             if (i < num_points) {
@@ -513,13 +567,14 @@ Status TileRouter::extract_batches(const TileAssignment& assignment,
                                    float* sorted_values,
                                    float* sorted_weights,
                                    float* sorted_timestamps,
-                                   std::vector<TileBatch>& out_batches) {
+                                   std::vector<TileBatch>& out_batches,
+                                   GlyphSortArrays* glyph) {
     if (assignment.location == MemoryLocation::Host) {
         return extract_batches_cpu(assignment, sorted_values, sorted_weights,
-                                   sorted_timestamps, out_batches, impl_->config);
+                                   sorted_timestamps, out_batches, impl_->config, glyph);
     } else {
         return extract_batches_gpu_dispatch(assignment, sorted_values, sorted_weights,
-                                            sorted_timestamps, out_batches, impl_->config);
+                                            sorted_timestamps, out_batches, impl_->config, glyph);
     }
 }
 
@@ -542,9 +597,10 @@ Status TileRouter::sort(TileAssignment& assignment,
                         float* values,
                         float* weights,
                         float* timestamps,
+                        GlyphSortArrays* glyph,
                         void* stream) {
     return sort_cpu(assignment, values, weights, timestamps,
-                    impl_->config, impl_->sort_indices, stream);
+                    glyph, impl_->config, impl_->sort_indices, stream);
 }
 
 /// Public API: CPU-only - always use CPU implementation
@@ -552,9 +608,10 @@ Status TileRouter::extract_batches(const TileAssignment& assignment,
                                    float* sorted_values,
                                    float* sorted_weights,
                                    float* sorted_timestamps,
-                                   std::vector<TileBatch>& out_batches) {
+                                   std::vector<TileBatch>& out_batches,
+                                   GlyphSortArrays* glyph) {
     return extract_batches_cpu(assignment, sorted_values, sorted_weights,
-                               sorted_timestamps, out_batches, impl_->config);
+                               sorted_timestamps, out_batches, impl_->config, glyph);
 }
 
 #endif // PCR_HAS_CUDA

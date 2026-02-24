@@ -8,6 +8,7 @@
 #include "pcr/core/grid.h"
 #include "pcr/core/point_cloud.h"
 #include "pcr/engine/filter.h"
+#include "pcr/engine/glyph.h"
 #include "pcr/engine/pipeline.h"
 #include "pcr/io/grid_io.h"
 #include "pcr/io/point_cloud_io.h"
@@ -408,6 +409,36 @@ PYBIND11_MODULE(_pcr, m) {
         .def("empty", &FilterSpec::empty);
 
     // -----------------------------------------------------------------------
+    // Glyph
+    // -----------------------------------------------------------------------
+    py::enum_<GlyphType>(m, "GlyphType")
+        .value("Point",    GlyphType::Point)
+        .value("Line",     GlyphType::Line)
+        .value("Gaussian", GlyphType::Gaussian)
+        .export_values();
+
+    py::class_<GlyphSpec>(m, "GlyphSpec")
+        .def(py::init<>())
+        .def_readwrite("type",                &GlyphSpec::type)
+        .def_readwrite("direction_channel",   &GlyphSpec::direction_channel)
+        .def_readwrite("default_direction",   &GlyphSpec::default_direction)
+        .def_readwrite("half_length_channel", &GlyphSpec::half_length_channel)
+        .def_readwrite("default_half_length", &GlyphSpec::default_half_length)
+        .def_readwrite("sigma_x_channel",     &GlyphSpec::sigma_x_channel)
+        .def_readwrite("default_sigma_x",     &GlyphSpec::default_sigma_x)
+        .def_readwrite("sigma_y_channel",     &GlyphSpec::sigma_y_channel)
+        .def_readwrite("default_sigma_y",     &GlyphSpec::default_sigma_y)
+        .def_readwrite("rotation_channel",    &GlyphSpec::rotation_channel)
+        .def_readwrite("default_rotation",    &GlyphSpec::default_rotation)
+        .def_readwrite("max_radius_cells",    &GlyphSpec::max_radius_cells)
+        .def_readwrite("normalize_weights",   &GlyphSpec::normalize_weights)
+        .def("__repr__", [](const GlyphSpec& g) {
+            const char* type_name[] = {"Point", "Line", "Gaussian"};
+            return std::string("GlyphSpec(type=") +
+                   type_name[static_cast<int>(g.type)] + ")";
+        });
+
+    // -----------------------------------------------------------------------
     // Pipeline
     // -----------------------------------------------------------------------
     py::class_<ReductionSpec>(m, "ReductionSpec")
@@ -417,7 +448,8 @@ PYBIND11_MODULE(_pcr, m) {
         .def_readwrite("weight_channel", &ReductionSpec::weight_channel)
         .def_readwrite("timestamp_channel", &ReductionSpec::timestamp_channel)
         .def_readwrite("percentile", &ReductionSpec::percentile)
-        .def_readwrite("output_band_name", &ReductionSpec::output_band_name);
+        .def_readwrite("output_band_name", &ReductionSpec::output_band_name)
+        .def_readwrite("glyph", &ReductionSpec::glyph);
 
     py::class_<PipelineConfig>(m, "PipelineConfig")
         .def(py::init<>())

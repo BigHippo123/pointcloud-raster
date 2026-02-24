@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "pybind11>=2.10.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcr"
+version = "0.1.0"
+description = "High-performance point cloud rasterization with CPU/GPU/Hybrid execution modes"
+readme = "README.md"
+authors = [
+    {name = "PCR Development Team", email = "dev@pcr-lib.org"}
+]
+license = {text = "MIT"}
+keywords = ["point-cloud", "lidar", "rasterization", "gpu", "geospatial"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=3.0.0",
+    "black>=22.0.0",
+    "flake8>=4.0.0",
+]
+las = [
+    "laspy>=2.0.0",  # For LAS/LAZ file support
+]
+viz = [
+    "matplotlib>=3.5.0",
+    "rasterio>=1.2.0",
+]
+all = [
+    "laspy>=2.0.0",
+    "matplotlib>=3.5.0",
+    "rasterio>=1.2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/pcr-dev/pcr"
+Documentation = "https://github.com/pcr-dev/pcr#readme"
+Repository = "https://github.com/pcr-dev/pcr"
+Issues = "https://github.com/pcr-dev/pcr/issues"
+
+[tool.setuptools]
+packages = ["pcr"]
+package-dir = {"" = "python"}
+
+[tool.setuptools.package-data]
+pcr = ["*.so", "*.pyd", "*.dll"]

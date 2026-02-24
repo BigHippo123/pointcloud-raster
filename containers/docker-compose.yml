@@ -1,3 +1,6 @@
+# PCR GPU Benchmarking Environment (Docker Compose)
+# Self-contained GPU builds via containers/Dockerfile.cuda. Requires NVIDIA Docker runtime.
+# Usage: docker compose -f containers/docker-compose.yml up
 version: '3.8'
 
 services:

@@ -1,0 +1,15 @@
+include LICENSE
+include README.md
+include pyproject.toml
+include CMakeLists.txt
+include VERSION
+
+recursive-include include *.h *.hpp
+recursive-include src *.cpp *.cu *.h
+recursive-include python *.py
+
+exclude .git*
+exclude .docker*
+prune build
+prune benchmark_results
+prune dc-lidar

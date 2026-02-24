@@ -1,0 +1,16 @@
+# PCR Development Environment (Docker Compose)
+# Mounts source for live editing, uses root Dockerfile.
+# Usage: docker-compose up -d
+version: '3.8'
+
+services:
+  pcr-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/workspace
+      - ./data:/data
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    runtime: nvidia

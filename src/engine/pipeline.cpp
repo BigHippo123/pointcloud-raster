@@ -2,6 +2,7 @@
 #include "pcr/engine/tile_manager.h"
 #include "pcr/engine/tile_router.h"
 #include "pcr/engine/accumulator.h"
+#include "pcr/engine/glyph_kernels.h"
 #include "pcr/engine/filter.h"
 #include "pcr/engine/memory_pool.h"
 #include "pcr/core/grid.h"
@@ -454,6 +455,185 @@ struct Pipeline::Impl {
                 ValuesGuard& operator=(const ValuesGuard&) = delete;
             } values_guard(values_copy_raw, values_copy_on_device);
 
+            // Build glyph sort arrays if reduction has non-Point glyph
+            const GlyphSpec& glyph = reduction.glyph;
+            bool use_glyph = (glyph.type != GlyphType::Point);
+
+            // Allocate and fill sorted coordinate + glyph param arrays
+            // These are allocated alongside values_copy_raw and freed at end of scope.
+            // For glyph kernels, we need world-space x/y of each sorted point.
+            struct GlyphArrays {
+                double* coord_x       = nullptr;
+                double* coord_y       = nullptr;
+                float*  direction     = nullptr;
+                float*  half_length   = nullptr;
+                float*  sigma_x       = nullptr;
+                float*  sigma_y       = nullptr;
+                float*  rotation      = nullptr;
+                bool    on_device     = false;
+
+                ~GlyphArrays() {
+                    auto do_free = [&](void* p) {
+                        if (!p) return;
+#ifdef PCR_HAS_CUDA
+                        if (on_device) { cudaFree(p); return; }
+#endif
+                        free(p);
+                    };
+                    do_free(coord_x);
+                    do_free(coord_y);
+                    do_free(direction);
+                    do_free(half_length);
+                    do_free(sigma_x);
+                    do_free(sigma_y);
+                    do_free(rotation);
+                }
+                GlyphArrays() = default;
+                GlyphArrays(const GlyphArrays&) = delete;
+                GlyphArrays& operator=(const GlyphArrays&) = delete;
+            } ga;
+
+            GlyphSortArrays gsa;
+
+            if (use_glyph) {
+                // Validate reduction type for glyph
+                if (reduction.type != ReductionType::WeightedAverage &&
+                    reduction.type != ReductionType::Average &&
+                    reduction.type != ReductionType::Sum &&
+                    reduction.type != ReductionType::Count) {
+                    if (need_free_indices) free(filtered_indices);
+                    return Status::error(StatusCode::NotImplemented,
+                        "pipeline: glyph splatting only supports "
+                        "WeightedAverage, Average, Sum, or Count reduction types");
+                }
+
+                size_t n = copy_count;
+                const double* src_x = processing_cloud->x();
+                const double* src_y = processing_cloud->y();
+
+#ifdef PCR_HAS_CUDA
+                if (should_use_gpu(*processing_cloud)) {
+                    ga.on_device = true;
+                    auto cuda_alloc_f64 = [&](size_t cnt) -> double* {
+                        double* p = nullptr;
+                        cudaMalloc(reinterpret_cast<void**>(&p), cnt * sizeof(double));
+                        return p;
+                    };
+                    auto cuda_alloc_f32 = [&](size_t cnt) -> float* {
+                        float* p = nullptr;
+                        cudaMalloc(reinterpret_cast<void**>(&p), cnt * sizeof(float));
+                        return p;
+                    };
+
+                    ga.coord_x = cuda_alloc_f64(n);
+                    ga.coord_y = cuda_alloc_f64(n);
+                    if (!ga.coord_x || !ga.coord_y) {
+                        if (need_free_indices) free(filtered_indices);
+                        return Status::error(StatusCode::OutOfMemory,
+                            "pipeline: failed to allocate glyph coord arrays on device");
+                    }
+
+                    if (need_free_indices) {
+                        // Gather filtered subset (host side, then upload)
+                        std::vector<double> h_x(n), h_y(n);
+                        std::vector<double> src_x_h(processing_cloud->count());
+                        std::vector<double> src_y_h(processing_cloud->count());
+                        cudaMemcpy(src_x_h.data(), src_x, processing_cloud->count() * sizeof(double), cudaMemcpyDefault);
+                        cudaMemcpy(src_y_h.data(), src_y, processing_cloud->count() * sizeof(double), cudaMemcpyDefault);
+                        std::vector<uint32_t> h_idx(filtered_count);
+                        cudaMemcpy(h_idx.data(), filtered_indices, filtered_count * sizeof(uint32_t), cudaMemcpyDefault);
+                        for (size_t i = 0; i < n; ++i) { h_x[i] = src_x_h[h_idx[i]]; h_y[i] = src_y_h[h_idx[i]]; }
+                        cudaMemcpy(ga.coord_x, h_x.data(), n * sizeof(double), cudaMemcpyHostToDevice);
+                        cudaMemcpy(ga.coord_y, h_y.data(), n * sizeof(double), cudaMemcpyHostToDevice);
+                    } else {
+                        cudaMemcpy(ga.coord_x, src_x, n * sizeof(double), cudaMemcpyDefault);
+                        cudaMemcpy(ga.coord_y, src_y, n * sizeof(double), cudaMemcpyDefault);
+                    }
+
+                    // Glyph float channels (from cloud — device pointers)
+                    auto copy_glyph_channel = [&](const std::string& ch_name) -> float* {
+                        if (ch_name.empty()) return nullptr;
+                        const ChannelDesc* cd = processing_cloud->channel(ch_name);
+                        if (!cd || cd->dtype != DataType::Float32) return nullptr;
+                        const float* src_ch = static_cast<const float*>(processing_cloud->channel_data(ch_name));
+                        if (!src_ch) return nullptr;
+                        float* dst = cuda_alloc_f32(n);
+                        if (!dst) return nullptr;
+                        if (need_free_indices) {
+                            std::vector<float> h_ch(processing_cloud->count());
+                            std::vector<uint32_t> h_idx2(filtered_count);
+                            cudaMemcpy(h_ch.data(), src_ch, processing_cloud->count() * sizeof(float), cudaMemcpyDefault);
+                            cudaMemcpy(h_idx2.data(), filtered_indices, filtered_count * sizeof(uint32_t), cudaMemcpyDefault);
+                            std::vector<float> h_filt(n);
+                            for (size_t i = 0; i < n; ++i) h_filt[i] = h_ch[h_idx2[i]];
+                            cudaMemcpy(dst, h_filt.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+                        } else {
+                            cudaMemcpy(dst, src_ch, n * sizeof(float), cudaMemcpyDefault);
+                        }
+                        return dst;
+                    };
+
+                    ga.direction   = copy_glyph_channel(glyph.direction_channel);
+                    ga.half_length = copy_glyph_channel(glyph.half_length_channel);
+                    ga.sigma_x     = copy_glyph_channel(glyph.sigma_x_channel);
+                    ga.sigma_y     = copy_glyph_channel(glyph.sigma_y_channel);
+                    ga.rotation    = copy_glyph_channel(glyph.rotation_channel);
+                } else
+#endif
+                {
+                    // CPU path
+                    ga.on_device = false;
+                    ga.coord_x = static_cast<double*>(malloc(n * sizeof(double)));
+                    ga.coord_y = static_cast<double*>(malloc(n * sizeof(double)));
+                    if (!ga.coord_x || !ga.coord_y) {
+                        if (need_free_indices) free(filtered_indices);
+                        return Status::error(StatusCode::OutOfMemory,
+                            "pipeline: failed to allocate glyph coord arrays");
+                    }
+
+                    if (need_free_indices) {
+                        for (size_t i = 0; i < n; ++i) {
+                            ga.coord_x[i] = src_x[filtered_indices[i]];
+                            ga.coord_y[i] = src_y[filtered_indices[i]];
+                        }
+                    } else {
+                        memcpy(ga.coord_x, src_x, n * sizeof(double));
+                        memcpy(ga.coord_y, src_y, n * sizeof(double));
+                    }
+
+                    // Glyph float channels (CPU)
+                    auto copy_glyph_channel_cpu = [&](const std::string& ch_name) -> float* {
+                        if (ch_name.empty()) return nullptr;
+                        const ChannelDesc* cd = processing_cloud->channel(ch_name);
+                        if (!cd || cd->dtype != DataType::Float32) return nullptr;
+                        const float* src_ch = static_cast<const float*>(processing_cloud->channel_data(ch_name));
+                        if (!src_ch) return nullptr;
+                        float* dst = static_cast<float*>(malloc(n * sizeof(float)));
+                        if (!dst) return nullptr;
+                        if (need_free_indices) {
+                            for (size_t i = 0; i < n; ++i) dst[i] = src_ch[filtered_indices[i]];
+                        } else {
+                            memcpy(dst, src_ch, n * sizeof(float));
+                        }
+                        return dst;
+                    };
+
+                    ga.direction   = copy_glyph_channel_cpu(glyph.direction_channel);
+                    ga.half_length = copy_glyph_channel_cpu(glyph.half_length_channel);
+                    ga.sigma_x     = copy_glyph_channel_cpu(glyph.sigma_x_channel);
+                    ga.sigma_y     = copy_glyph_channel_cpu(glyph.sigma_y_channel);
+                    ga.rotation    = copy_glyph_channel_cpu(glyph.rotation_channel);
+                }
+
+                gsa.coord_x     = ga.coord_x;
+                gsa.coord_y     = ga.coord_y;
+                gsa.direction   = ga.direction;
+                gsa.half_length = ga.half_length;
+                gsa.sigma_x     = ga.sigma_x;
+                gsa.sigma_y     = ga.sigma_y;
+                gsa.rotation    = ga.rotation;
+            }
+
             // Route points to tiles
             TileAssignment assignment;
 
@@ -485,8 +665,9 @@ struct Pipeline::Impl {
                 return s;
             }
 
-            // Sort by tile and cell
-            s = router->sort(assignment, values_copy_raw, nullptr, nullptr);
+            // Sort by tile and cell (co-sort glyph arrays if present)
+            s = router->sort(assignment, values_copy_raw, nullptr, nullptr,
+                             use_glyph ? &gsa : nullptr);
             if (!s.ok()) {
                 cleanup_assignment(assignment);
                 if (need_free_indices) free(filtered_indices);
@@ -495,7 +676,8 @@ struct Pipeline::Impl {
 
             // Extract per-tile batches
             std::vector<TileBatch> batches;
-            s = router->extract_batches(assignment, values_copy_raw, nullptr, nullptr, batches);
+            s = router->extract_batches(assignment, values_copy_raw, nullptr, nullptr,
+                                        batches, use_glyph ? &gsa : nullptr);
             if (!s.ok()) {
                 cleanup_assignment(assignment);
                 if (need_free_indices) free(filtered_indices);
@@ -519,11 +701,19 @@ struct Pipeline::Impl {
                 config.grid.tile_cell_range(batch.tile, col_start, row_start, col_count, row_count);
                 int64_t actual_tile_cells = static_cast<int64_t>(col_count) * row_count;
 
-                // Accumulate points into tile state.
-                // In GPU mode, TileManager::acquire() returns a device pointer and handles
-                // the H2D upload; TileManager::release() handles the D2H download.
-                // So state_ptr is already in the correct memory space for the accumulator.
-                s = accumulator->accumulate(reduction.type, batch, state_ptr, actual_tile_cells);
+                if (use_glyph) {
+                    // Glyph path: paint footprint across cells
+                    s = accumulate_glyph(glyph, reduction.type, batch,
+                                         state_ptr, actual_tile_cells,
+                                         config.grid,
+                                         col_start, row_start, col_count, row_count);
+                } else {
+                    // Standard path: 1-cell scatter
+                    // In GPU mode, TileManager::acquire() returns a device pointer and handles
+                    // the H2D upload; TileManager::release() handles the D2H download.
+                    s = accumulator->accumulate(reduction.type, batch, state_ptr,
+                                                actual_tile_cells);
+                }
                 if (!s.ok()) {
                     mgr->release(batch.tile);
                     cleanup_batches(batches);
@@ -677,6 +867,96 @@ struct Pipeline::Impl {
                 std::memcpy(values_host, values, num_points * sizeof(float));
             }
 
+            // Glyph support in Hybrid mode
+            const GlyphSpec& glyph = reduction.glyph;
+            bool use_glyph = (glyph.type != GlyphType::Point);
+
+            struct HybridGlyphArrays {
+                double* coord_x     = nullptr;
+                double* coord_y     = nullptr;
+                float*  direction   = nullptr;
+                float*  half_length = nullptr;
+                float*  sigma_x     = nullptr;
+                float*  sigma_y     = nullptr;
+                float*  rotation    = nullptr;
+
+                ~HybridGlyphArrays() {
+                    free(coord_x); free(coord_y); free(direction); free(half_length);
+                    free(sigma_x); free(sigma_y); free(rotation);
+                }
+                HybridGlyphArrays() = default;
+                HybridGlyphArrays(const HybridGlyphArrays&) = delete;
+                HybridGlyphArrays& operator=(const HybridGlyphArrays&) = delete;
+            } hga;
+
+            GlyphSortArrays gsa;
+
+            if (use_glyph) {
+                if (reduction.type != ReductionType::WeightedAverage &&
+                    reduction.type != ReductionType::Average &&
+                    reduction.type != ReductionType::Sum &&
+                    reduction.type != ReductionType::Count) {
+                    free(values_host);
+                    if (need_free_indices) free(filtered_indices);
+                    return Status::error(StatusCode::NotImplemented,
+                        "pipeline: Hybrid glyph splatting only supports "
+                        "WeightedAverage, Average, Sum, or Count");
+                }
+
+                size_t n = copy_count;
+                const double* src_x = routing_cloud->x();
+                const double* src_y = routing_cloud->y();
+
+                hga.coord_x = static_cast<double*>(malloc(n * sizeof(double)));
+                hga.coord_y = static_cast<double*>(malloc(n * sizeof(double)));
+                if (!hga.coord_x || !hga.coord_y) {
+                    free(values_host);
+                    if (need_free_indices) free(filtered_indices);
+                    return Status::error(StatusCode::OutOfMemory,
+                        "pipeline: Hybrid glyph coord alloc failed");
+                }
+
+                if (need_free_indices) {
+                    for (size_t i = 0; i < n; ++i) {
+                        hga.coord_x[i] = src_x[filtered_indices[i]];
+                        hga.coord_y[i] = src_y[filtered_indices[i]];
+                    }
+                } else {
+                    memcpy(hga.coord_x, src_x, n * sizeof(double));
+                    memcpy(hga.coord_y, src_y, n * sizeof(double));
+                }
+
+                auto copy_ch = [&](const std::string& ch_name) -> float* {
+                    if (ch_name.empty()) return nullptr;
+                    const ChannelDesc* cd = routing_cloud->channel(ch_name);
+                    if (!cd || cd->dtype != DataType::Float32) return nullptr;
+                    const float* src_ch = static_cast<const float*>(routing_cloud->channel_data(ch_name));
+                    if (!src_ch) return nullptr;
+                    float* dst = static_cast<float*>(malloc(n * sizeof(float)));
+                    if (!dst) return nullptr;
+                    if (need_free_indices) {
+                        for (size_t i = 0; i < n; ++i) dst[i] = src_ch[filtered_indices[i]];
+                    } else {
+                        memcpy(dst, src_ch, n * sizeof(float));
+                    }
+                    return dst;
+                };
+
+                hga.direction   = copy_ch(glyph.direction_channel);
+                hga.half_length = copy_ch(glyph.half_length_channel);
+                hga.sigma_x     = copy_ch(glyph.sigma_x_channel);
+                hga.sigma_y     = copy_ch(glyph.sigma_y_channel);
+                hga.rotation    = copy_ch(glyph.rotation_channel);
+
+                gsa.coord_x     = hga.coord_x;
+                gsa.coord_y     = hga.coord_y;
+                gsa.direction   = hga.direction;
+                gsa.half_length = hga.half_length;
+                gsa.sigma_x     = hga.sigma_x;
+                gsa.sigma_y     = hga.sigma_y;
+                gsa.rotation    = hga.rotation;
+            }
+
             // ---------------------------------------------------------------
             // Phase 1 (CPU): Route + sort using cpu_router (host memory paths)
             //
@@ -705,7 +985,8 @@ struct Pipeline::Impl {
                     return s;
                 }
 
-                s = cpu_router->sort(assignment, values_host, nullptr, nullptr);
+                s = cpu_router->sort(assignment, values_host, nullptr, nullptr,
+                                     use_glyph ? &gsa : nullptr);
                 if (!s.ok()) {
                     free(assignment.cell_indices);
                     free(assignment.tile_indices);
@@ -717,7 +998,8 @@ struct Pipeline::Impl {
 
                 std::vector<TileBatch> batches;
                 s = cpu_router->extract_batches(assignment, values_host,
-                                                nullptr, nullptr, batches);
+                                                nullptr, nullptr, batches,
+                                                use_glyph ? &gsa : nullptr);
                 if (!s.ok()) {
                     free(assignment.cell_indices);
                     free(assignment.tile_indices);
@@ -728,9 +1010,9 @@ struct Pipeline::Impl {
                 }
 
                 // ---------------------------------------------------------------
-                // Phase 2: GPU accumulation using grow-only device staging buffers.
-                // cudaMemcpyAsync on the stream serialises transfers after prior
-                // kernels — safe to reuse the same staging buffer every batch.
+                // Phase 2 accumulation.
+                // For regular (non-glyph) batches: upload to GPU and accumulate.
+                // For glyph batches: accumulate on CPU (uses host batch directly).
                 // ---------------------------------------------------------------
                 uint32_t* d_stage_idx  = nullptr;
                 float*    d_stage_vals = nullptr;
@@ -759,34 +1041,58 @@ struct Pipeline::Impl {
                     config.grid.tile_cell_range(batch.tile, cs, rs, cc, rc);
                     int64_t actual_tile_cells = static_cast<int64_t>(cc) * rc;
 
-                    if (!ensure_staging(batch.num_points)) {
-                        accum_error = Status::error(StatusCode::OutOfMemory,
-                            "Hybrid: failed to grow device staging buffer");
-                        break;
-                    }
-
-                    cudaMemcpyAsync(d_stage_idx, batch.local_cell_indices,
-                                    batch.num_points * sizeof(uint32_t),
-                                    cudaMemcpyHostToDevice, cuda_stream);
-                    cudaMemcpyAsync(d_stage_vals, batch.values,
-                                    batch.num_points * sizeof(float),
-                                    cudaMemcpyHostToDevice, cuda_stream);
-
-                    TileBatch dev_batch;
-                    dev_batch.tile               = batch.tile;
-                    dev_batch.local_cell_indices  = d_stage_idx;
-                    dev_batch.values              = d_stage_vals;
-                    dev_batch.weights             = nullptr;
-                    dev_batch.timestamps          = nullptr;
-                    dev_batch.num_points          = batch.num_points;
-                    dev_batch.location            = MemoryLocation::Device;
-
                     float* state_ptr = nullptr;
                     s = mgr->acquire(batch.tile, reduction.type, &state_ptr);
                     if (!s.ok()) { accum_error = s; break; }
 
-                    s = accumulator->accumulate(reduction.type, dev_batch,
-                                                state_ptr, actual_tile_cells, cuda_stream);
+                    if (use_glyph) {
+                        // For glyph mode in Hybrid: download state to host,
+                        // accumulate on CPU, then state is re-uploaded on release.
+                        // (Phase 8 will optimize this with direct GPU glyph accumulation)
+                        const ReductionInfo* info = get_reduction(reduction.type);
+                        size_t state_bytes = static_cast<size_t>(info->state_floats)
+                                            * actual_tile_cells * sizeof(float);
+
+                        std::vector<float> host_state(info->state_floats * actual_tile_cells);
+                        cudaMemcpy(host_state.data(), state_ptr, state_bytes,
+                                   cudaMemcpyDeviceToHost);
+                        if (cuda_stream) cudaStreamSynchronize(cuda_stream);
+
+                        s = accumulate_glyph(glyph, reduction.type, batch,
+                                             host_state.data(), actual_tile_cells,
+                                             config.grid, cs, rs, cc, rc);
+                        if (s.ok()) {
+                            cudaMemcpy(state_ptr, host_state.data(), state_bytes,
+                                       cudaMemcpyHostToDevice);
+                        }
+                    } else {
+                        if (!ensure_staging(batch.num_points)) {
+                            mgr->release(batch.tile);
+                            accum_error = Status::error(StatusCode::OutOfMemory,
+                                "Hybrid: failed to grow device staging buffer");
+                            break;
+                        }
+
+                        cudaMemcpyAsync(d_stage_idx, batch.local_cell_indices,
+                                        batch.num_points * sizeof(uint32_t),
+                                        cudaMemcpyHostToDevice, cuda_stream);
+                        cudaMemcpyAsync(d_stage_vals, batch.values,
+                                        batch.num_points * sizeof(float),
+                                        cudaMemcpyHostToDevice, cuda_stream);
+
+                        TileBatch dev_batch;
+                        dev_batch.tile               = batch.tile;
+                        dev_batch.local_cell_indices  = d_stage_idx;
+                        dev_batch.values              = d_stage_vals;
+                        dev_batch.weights             = nullptr;
+                        dev_batch.timestamps          = nullptr;
+                        dev_batch.num_points          = batch.num_points;
+                        dev_batch.location            = MemoryLocation::Device;
+
+                        s = accumulator->accumulate(reduction.type, dev_batch,
+                                                    state_ptr, actual_tile_cells, cuda_stream);
+                    }
+
                     if (!s.ok()) { mgr->release(batch.tile); accum_error = s; break; }
 
                     s = mgr->release(batch.tile);

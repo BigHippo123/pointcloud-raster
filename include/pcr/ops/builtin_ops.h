@@ -81,8 +81,13 @@ struct WeightedAverageOp {
 
     static PCR_HD State identity()                    { return {0.0f, 0.0f}; }
 
-    /// Standard combine: val encodes value, weight passed separately.
-    /// In the kernel, the caller packs (value * weight) into val and weight into weight_arg.
+    /// Unweighted combine (weight=1): used by the standard accumulate path and
+    /// by glyph kernels that inject their own weights directly into state.
+    static PCR_HD State combine(State acc, float val) {
+        return {acc.weighted_sum + val, acc.weight_sum + 1.0f};
+    }
+
+    /// Weighted combine: val is the measurement, weight passed separately.
     static PCR_HD State combine_weighted(State acc, float val, float weight) {
         return {acc.weighted_sum + val * weight, acc.weight_sum + weight};
     }

@@ -1,0 +1,19 @@
+-r requirements.txt
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=3.0.0
+
+# Code quality
+black>=22.0.0
+flake8>=4.0.0
+isort>=5.10.0
+
+# Optional features
+laspy>=2.0.0
+matplotlib>=3.5.0
+rasterio>=1.2.0
+
+# Build tools
+pybind11>=2.10.0
+cmake>=3.18.0

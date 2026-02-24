@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.18)
-project(PCR VERSION 0.1.0 LANGUAGES CXX)
+
+# Read version from file
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" PCR_VERSION)
+string(STRIP "${PCR_VERSION}" PCR_VERSION)
+project(PCR VERSION ${PCR_VERSION} LANGUAGES CXX)
 
 # ---------------------------------------------------------------------------
 # CMake module path
@@ -131,6 +135,7 @@ set(PCR_ENGINE_SOURCES
     src/engine/accumulator.cpp
     src/engine/filter.cpp
     src/engine/tile_router.cpp
+    src/engine/glyph_kernels.cu   # CPU+GPU glyph: compiled as CXX (no CUDA) or CUDA
 )
 
 # CUDA sources (only if CUDA enabled)
@@ -150,9 +155,13 @@ set(PCR_SOURCES
     ${PCR_ENGINE_SOURCES}
 )
 
-# Add CUDA sources if enabled
+# Add CUDA sources if enabled (purely GPU kernel files)
 if(PCR_ENABLE_CUDA)
     list(APPEND PCR_SOURCES ${PCR_ENGINE_CUDA_SOURCES})
+else()
+    # When CUDA is disabled, glyph_kernels.cu is compiled as C++.
+    # CMake needs an explicit hint to use the CXX compiler for .cu files.
+    set_source_files_properties(src/engine/glyph_kernels.cu PROPERTIES LANGUAGE CXX)
 endif()
 
 # Create library

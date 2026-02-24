@@ -176,11 +176,11 @@ static std::unordered_map<ReductionType, ReductionInfo> g_registry = {
     {ReductionType::Max,     make_reduction_info<MaxOp>(ReductionType::Max)},
     {ReductionType::Min,     make_reduction_info<MinOp>(ReductionType::Min)},
     {ReductionType::Count,   make_reduction_info<CountOp>(ReductionType::Count)},
-    {ReductionType::Average, make_reduction_info<AverageOp>(ReductionType::Average)},
+    {ReductionType::Average,         make_reduction_info<AverageOp>(ReductionType::Average)},
+    {ReductionType::WeightedAverage, make_reduction_info<WeightedAverageOp>(ReductionType::WeightedAverage)},
 
-    // TODO: WeightedAverageOp and MostRecentOp require special accumulate kernels
-    //       that take additional channel data (weight/timestamp). These need
-    //       extended AccumulateFn signatures or separate kernel paths.
+    // TODO: MostRecentOp requires special accumulate kernels that take additional
+    //       channel data (timestamp). Needs extended AccumulateFn signature.
 
     // TODO: Median, Percentile, PriorityMerge not yet implemented
 };

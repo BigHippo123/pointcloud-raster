@@ -1,0 +1,5 @@
+mode,glyph,glyph_label,value_channel,points,files,wall_total_s,io_read_s,cloud_create_s,ingest_s,finalize_s,library_time_s,throughput_mpts,speedup,output_tif
+cpu-1t,point,Point,elevation,147855161,50,82.007,50.249,2.443,22.973,5.986,28.959,5.106,1.0,/workspace/benchmark_results/full_dataset/dc_lidar_cpu-1t_point.tif
+cpu-mt,point,Point,elevation,147855161,50,79.051,50.881,1.823,20.292,5.78,26.072,5.671,1.0,/workspace/benchmark_results/full_dataset/dc_lidar_cpu-mt_point.tif
+gpu,point,Point,elevation,147855161,50,68.251,51.649,2.632,6.497,7.07,13.567,10.899,1.92,/workspace/benchmark_results/full_dataset/dc_lidar_gpu_point.tif
+hybrid,point,Point,elevation,147855161,50,81.388,50.102,2.3,21.924,6.734,28.659,5.159,0.91,/workspace/benchmark_results/full_dataset/dc_lidar_hybrid_point.tif

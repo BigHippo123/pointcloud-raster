@@ -3,6 +3,7 @@
 #include "pcr/core/types.h"
 #include "pcr/core/grid_config.h"
 #include "pcr/engine/filter.h"
+#include "pcr/engine/glyph.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -27,6 +28,9 @@ struct ReductionSpec {
 
     // Optional output band name (defaults to "{value_channel}_{type}")
     std::string   output_band_name;
+
+    // Glyph splatting — default GlyphType::Point preserves existing behavior
+    GlyphSpec     glyph;
 };
 
 // ---------------------------------------------------------------------------

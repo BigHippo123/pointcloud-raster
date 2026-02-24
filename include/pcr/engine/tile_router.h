@@ -41,6 +41,30 @@ struct TileBatch {
     float*    timestamps         = nullptr;  // optional timestamp channel (nullptr if unused)
     size_t    num_points         = 0;
     MemoryLocation location      = MemoryLocation::Host;  // memory location of pointers
+
+    // Glyph splatting support — all nullable; null = use GlyphSpec::default_*
+    double*   coord_x            = nullptr;  // sorted world X coords (for glyph kernels)
+    double*   coord_y            = nullptr;  // sorted world Y coords (for glyph kernels)
+    float*    glyph_direction    = nullptr;  // per-point line direction (radians)
+    float*    glyph_half_length  = nullptr;  // per-point line half-length (world units)
+    float*    glyph_sigma_x      = nullptr;  // per-point Gaussian sigma X (world units)
+    float*    glyph_sigma_y      = nullptr;  // per-point Gaussian sigma Y (world units)
+    float*    glyph_rotation     = nullptr;  // per-point Gaussian rotation (radians)
+};
+
+// ---------------------------------------------------------------------------
+// GlyphSortArrays — optional glyph arrays to co-sort alongside values.
+// Pass to TileRouter::sort() and TileRouter::extract_batches().
+// Null pointers are silently skipped (no co-sort for that array).
+// ---------------------------------------------------------------------------
+struct GlyphSortArrays {
+    double* coord_x         = nullptr;  // world X coords (double)
+    double* coord_y         = nullptr;  // world Y coords (double)
+    float*  direction       = nullptr;
+    float*  half_length     = nullptr;
+    float*  sigma_x         = nullptr;
+    float*  sigma_y         = nullptr;
+    float*  rotation        = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -61,11 +85,13 @@ public:
 
     /// Phase 2: Sort points by tile, then by cell within tile.
     /// Reorders cell_indices and co-sorts value/weight/timestamp arrays.
+    /// Optional glyph arrays (coord_x, coord_y, glyph_*) are co-sorted too.
     /// After this call, you can extract TileBatches.
     Status sort(TileAssignment& assignment,
                 float* values,
-                float* weights,          // nullptr if not needed
-                float* timestamps,       // nullptr if not needed
+                float* weights,                      // nullptr if not needed
+                float* timestamps,                   // nullptr if not needed
+                GlyphSortArrays* glyph = nullptr,    // nullptr if no glyph co-sort
                 void* stream = nullptr);
 
     /// Phase 3: Extract per-tile batches from the sorted arrays.
@@ -75,7 +101,8 @@ public:
                            float* sorted_values,
                            float* sorted_weights,
                            float* sorted_timestamps,
-                           std::vector<TileBatch>& out_batches);
+                           std::vector<TileBatch>& out_batches,
+                           GlyphSortArrays* glyph = nullptr);
 
 private:
     struct Impl;

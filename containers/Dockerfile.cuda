@@ -1,5 +1,6 @@
 # PCR GPU Benchmarking Docker Image
-# Based on NVIDIA CUDA official image with Ubuntu 22.04
+# Self-contained build for running GPU benchmarks (no source mount needed).
+# See containers/docker-compose.yml for usage.
 FROM nvidia/cuda:13.0.0-devel-ubuntu22.04
 
 # Prevent interactive prompts during package installation
@@ -62,10 +63,10 @@ RUN cmake .. \
 RUN mkdir -p /workspace/results
 
 # Copy visualization test scripts
-COPY ../scripts/generate_all_patterns.py /workspace/
-COPY ../scripts/generate_gpu_patterns.py /workspace/
-COPY ../scripts/compare_cpu_gpu_patterns.py /workspace/
-COPY ../scripts/run_gpu_visual_tests.sh /workspace/
+COPY ../scripts/patterns/generate_all_patterns.py /workspace/
+COPY ../scripts/patterns/generate_gpu_patterns.py /workspace/
+COPY ../scripts/patterns/compare_cpu_gpu_patterns.py /workspace/
+COPY ../scripts/shell/run_gpu_visual_tests.sh /workspace/
 RUN chmod +x /workspace/run_gpu_visual_tests.sh
 
 # Set environment variables
