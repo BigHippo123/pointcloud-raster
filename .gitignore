@@ -1,0 +1,9 @@
+/build/
+pattern_*
+gpu_pattern_*
+/hybrid_outputs/
+/multithread_outputs/
+*.png
+*.tif
+results/
+/archived/
