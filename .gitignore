@@ -1,9 +1,75 @@
+# Build artifacts
 /build/
-pattern_*
-gpu_pattern_*
-/hybrid_outputs/
-/multithread_outputs/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+Makefile
+*.vcxproj
+*.sln
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+*.whl
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.continue/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Output directories
+*_outputs/
+*_output/
+
+# Generated images and patterns
 *.png
 *.tif
+*.tiff
+pattern_*
+gpu_pattern_*
+/glyph_pattern_output/
+/glyph_pattern_outputs/
+/hybrid_outputs/
+/multithread_outputs/
+
+# Large data files
+dc-lidar/
+*.las
+*.laz
+
+# Logs and results
+*.log
 results/
-/archived/
+benchmark_results/
+
+
+# Script-generated results
+scripts/*.csv
+scripts/*.txt
+
+# Conda build artifacts
+conda/build/

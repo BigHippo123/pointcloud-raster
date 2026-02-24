@@ -1,0 +1,29 @@
+name: Code Quality
+
+on: [push, pull_request]
+
+jobs:
+  python-lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+    - name: Install linters
+      run: pip install black flake8 isort
+    - name: Check formatting (black)
+      run: black --check python/ tests/python/
+    - name: Check imports (isort)
+      run: isort --check python/ tests/python/
+    - name: Lint (flake8)
+      run: flake8 python/ tests/python/ --max-line-length=100
+
+  cpp-format:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Check C++ formatting
+      run: |
+        find src include -name '*.cpp' -o -name '*.h' -o -name '*.cu' | \
+          xargs clang-format --dry-run --Werror

@@ -1,0 +1,233 @@
+name: Benchmarks
+
+on:
+  # Manual trigger with configurable options
+  workflow_dispatch:
+    inputs:
+      quick:
+        description: "Quick mode (skip full glyph benchmark)"
+        type: boolean
+        default: false
+      python_version:
+        description: "Python version"
+        type: choice
+        options: ["3.10", "3.11", "3.12"]
+        default: "3.10"
+
+  # Weekly scheduled run (CPU-only; GPU runs must be triggered manually on self-hosted runners)
+  schedule:
+    - cron: "0 3 * * 1"  # Every Monday at 03:00 UTC
+
+# Only run one benchmark at a time to avoid conflicting results
+concurrency:
+  group: benchmarks
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write       # deploy to GitHub Pages
+  id-token: write    # OIDC token for Pages deployment
+
+jobs:
+  benchmark:
+    name: Run benchmarks (CPU)
+    runs-on: ubuntu-latest
+
+    # Required for actions/deploy-pages OIDC authentication
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy-pages.outputs.page_url }}
+
+    env:
+      # Benchmark scripts use this hardcoded path; symlink is created below.
+      PYTHONPATH: /workspace/python
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Benchmark scripts use hardcoded /workspace/ paths — create a bind point.
+      - name: Map checkout to /workspace
+        run: |
+          sudo mkdir -p /workspace
+          sudo mount --bind "$GITHUB_WORKSPACE" /workspace
+
+      - name: Set up Python ${{ inputs.python_version || '3.10' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version || '3.10' }}
+          cache: pip
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake g++ libgdal-dev libproj-dev libomp-dev \
+            python3-dev
+
+      - name: Install Python dependencies
+        run: pip install numpy matplotlib
+
+      - name: Build PCR (CPU-only)
+        run: |
+          mkdir -p /workspace/build
+          cd /workspace/build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPCR_ENABLE_CUDA=OFF \
+            -DPCR_BUILD_PYTHON=ON \
+            -DPCR_BUILD_TESTS=OFF
+          cmake --build . --target _pcr -j$(nproc)
+
+      - name: Verify import
+        run: python3 -c "import pcr; print('PCR', pcr.__version__)"
+
+      # ── Run benchmarks ──────────────────────────────────────────────────────
+      - name: Multi-thread CPU scaling
+        continue-on-error: true
+        run: |
+          python3 /workspace/scripts/benchmarks/benchmark_multithread.py \
+            | tee /tmp/multithread.txt
+          [ -f /workspace/scripts/benchmarks/multithread_benchmark_results.csv ] && \
+            cp /workspace/scripts/benchmarks/multithread_benchmark_results.csv /tmp/multithread.csv || true
+
+      - name: CPU vs GPU throughput
+        continue-on-error: true
+        run: |
+          python3 /workspace/scripts/benchmarks/benchmark_cpu_gpu.py \
+            | tee /tmp/cpu_vs_gpu.txt
+          [ -f /workspace/scripts/benchmarks/performance_comparison.csv ] && \
+            cp /workspace/scripts/benchmarks/performance_comparison.csv /tmp/cpu_vs_gpu.csv || true
+
+      - name: Hybrid mode benchmark
+        continue-on-error: true
+        run: |
+          python3 /workspace/scripts/benchmarks/benchmark_hybrid.py \
+            | tee /tmp/hybrid.txt
+          [ -f /workspace/scripts/benchmarks/hybrid_benchmark_results.csv ] && \
+            cp /workspace/scripts/benchmarks/hybrid_benchmark_results.csv /tmp/hybrid.csv || true
+
+      - name: Quick glyph benchmark
+        continue-on-error: true
+        run: |
+          python3 /workspace/scripts/benchmarks/bench_glyphs.py \
+            | tee /tmp/bench_glyphs.txt
+          [ -f /workspace/scripts/benchmarks/bench_glyphs_chart.png ] && \
+            cp /workspace/scripts/benchmarks/bench_glyphs_chart.png /tmp/ || true
+
+      - name: Full glyph benchmark (skipped when quick=true)
+        if: ${{ inputs.quick != true }}
+        continue-on-error: true
+        run: |
+          python3 /workspace/scripts/benchmarks/benchmark_glyph_full.py \
+            --mode cpu --repeats 2 \
+            | tee /tmp/glyphs_full.txt
+          [ -f /workspace/scripts/benchmarks/benchmark_glyph_results.csv ] && \
+            cp /workspace/scripts/benchmarks/benchmark_glyph_results.csv /tmp/glyphs_full.csv || true
+          [ -f /workspace/scripts/benchmarks/benchmark_glyph_chart.png ] && \
+            cp /workspace/scripts/benchmarks/benchmark_glyph_chart.png /tmp/glyphs_full_chart.png || true
+
+      - name: Glyph visual gallery (skipped when quick=true)
+        if: ${{ inputs.quick != true }}
+        continue-on-error: true
+        run: |
+          python3 /workspace/scripts/patterns/generate_glyph_patterns.py --mode cpu \
+            | tee /tmp/glyph_patterns.txt
+          # Copy the 8 gallery PNGs with glyph_ prefix for the report assembler
+          for png in /workspace/glyph_pattern_outputs/0[1-8]_*.png; do
+            [ -f "$png" ] && cp "$png" "/tmp/glyph_$(basename "$png")" || true
+          done
+
+      # ── Collect results & generate report ──────────────────────────────────
+      - name: Collect results
+        run: |
+          RESULTS_DIR="$GITHUB_WORKSPACE/benchmark_results/ci-${{ github.run_id }}"
+          mkdir -p "$RESULTS_DIR"
+
+          # System info
+          cat > "$RESULTS_DIR/system_info.txt" << EOF
+          timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          hostname=github-actions
+          cpu=$(grep 'model name' /proc/cpuinfo | head -1 | sed 's/model name\s*:\s*//')
+          cpu_cores=$(nproc)
+          ram_gb=$(awk '/MemTotal/ {printf "%.1f", $2/1024/1024}' /proc/meminfo)
+          gpu=none
+          pcr_version=$(python3 -c "import pcr; print(pcr.__version__)")
+          github_run=${{ github.run_id }}
+          github_ref=${{ github.ref_name }}
+          EOF
+
+          # Copy captured CSVs and charts
+          for f in /tmp/multithread.csv /tmp/cpu_vs_gpu.csv /tmp/hybrid.csv \
+                   /tmp/glyphs_full.csv /tmp/bench_glyphs_chart.png \
+                   /tmp/glyphs_full_chart.png; do
+            [ -f "$f" ] && cp "$f" "$RESULTS_DIR/" || true
+          done
+          # Copy glyph gallery PNGs (glyph_01_*.png … glyph_08_*.png)
+          for f in /tmp/glyph_*.png; do
+            [ -f "$f" ] && cp "$f" "$RESULTS_DIR/" || true
+          done
+
+          echo "RESULTS_DIR=$RESULTS_DIR" >> "$GITHUB_ENV"
+
+      - name: Generate report
+        run: |
+          python3 /workspace/scripts/benchmarks/generate_report.py \
+            --results-dir "$RESULTS_DIR" \
+            --title "PCR Benchmark — $(date -u '+%Y-%m-%d') (GitHub Actions CPU)"
+
+      # ── Post to GitHub Actions Job Summary ─────────────────────────────────
+      - name: Post Markdown summary
+        run: |
+          if [ -f "$RESULTS_DIR/benchmark_report.md" ]; then
+            cat "$RESULTS_DIR/benchmark_report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "⚠️ Report not generated" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # ── Upload artifacts for download ───────────────────────────────────────
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-report-${{ github.run_id }}
+          path: |
+            ${{ env.RESULTS_DIR }}/benchmark_report.html
+            ${{ env.RESULTS_DIR }}/benchmark_report.md
+            ${{ env.RESULTS_DIR }}/*.csv
+          retention-days: 90
+
+      - name: Upload raw benchmark logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-logs-${{ github.run_id }}
+          path: /tmp/*.txt
+          retention-days: 30
+
+      # ── Deploy to GitHub Pages ───────────────────────────────────────────────
+      # Requires: Settings → Pages → Source = "GitHub Actions"
+      - name: Prepare Pages site
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/public"
+          if [ -f "$RESULTS_DIR/benchmark_report.html" ]; then
+            cp "$RESULTS_DIR/benchmark_report.html" "$GITHUB_WORKSPACE/public/index.html"
+          else
+            echo "<h1>Benchmark report not generated</h1>" > "$GITHUB_WORKSPACE/public/index.html"
+          fi
+
+      - name: Configure Pages
+        if: always()
+        uses: actions/configure-pages@v4
+
+      - name: Upload Pages artifact
+        if: always()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ github.workspace }}/public
+
+      - name: Deploy to GitHub Pages
+        if: always()
+        id: deploy-pages
+        uses: actions/deploy-pages@v4
